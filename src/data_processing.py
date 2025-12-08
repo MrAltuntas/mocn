@@ -32,6 +32,30 @@ def load_data(dataset_name='kdd99'):
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
+    if MAX_SAMPLES is not None and MAX_SAMPLES < len(X):
+        print(f"\nSubsampling data to {MAX_SAMPLES} samples (stratified)...")
+        # Use train_test_split to perform stratified subsampling
+        X, _, y, _ = train_test_split(
+            X, y,
+            train_size=MAX_SAMPLES,
+            random_state=RANDOM_SEED,
+            stratify=y
+        )
+        print(f"  New dataset shape: X={X.shape}, y={y.shape}")
+        print(f"  New class distribution: {np.bincount(y)}")
+
+    # Filter out classes with only one sample, as this will break stratification
+    unique_labels, counts = np.unique(y, return_counts=True)
+    single_sample_labels = unique_labels[counts < 2]
+
+    if len(single_sample_labels) > 0:
+        print(f"\nFiltering out {len(single_sample_labels)} classes with less than 2 samples...")
+        filter_mask = ~np.isin(y, single_sample_labels)
+        X = X[filter_mask]
+        y = y[filter_mask]
+        print(f"  New dataset shape after filtering: X={X.shape}, y={y.shape}")
+        print(f"  New class distribution after filtering: {np.bincount(y)}")
+
     return X, y
 
 def _load_kdd99():

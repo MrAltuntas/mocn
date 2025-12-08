@@ -4,7 +4,7 @@
 RANDOM_SEED = 42
 TRAIN_TEST_SPLIT = 0.8
 
-SKIP_QUANTUM = True  # Skip quantum SVM training (faster for testing)
+SKIP_QUANTUM = False  # Skip quantum SVM training (faster for testing)
 VERBOSE = True  # Print detailed results
 SAVE_MODELS = True  # Save trained models to disk
 
@@ -12,6 +12,7 @@ SAVE_MODELS = True  # Save trained models to disk
 # DATASET PARAMETERS
 # ============================================
 DATASET_NAME = 'kdd99'  # 'netflow', 'kdd99', 'cores_iot'
+MAX_SAMPLES = 5000  # Max samples to use (for quick experiments)
 MIN_SAMPLES_PER_CLASS = 10  # Minimum samples required per class (rare classes will be filtered out)
 
 DATA_RAW_DIR = 'data/raw'
