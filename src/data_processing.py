@@ -156,11 +156,89 @@ def _load_kdd99():
 
 def _load_netflow():
     """
-    Load NetFlow dataset (placeholder)
-    TODO: Implement actual NetFlow loading logic
+    Load NetFlow dataset from raw numpy files
+    Performs one-hot encoding for categorical columns (PROTOCOL, TCP_FLAGS)
     """
-    print("WARNING: NetFlow loader not implemented. Using synthetic data.")
-    return
+    import os
+
+    # Load raw numpy files
+    X_file = os.path.join(NETFLOW_PATH, 'X_raw.npy')
+    y_file = os.path.join(NETFLOW_PATH, 'y_raw.npy')
+
+    if not os.path.exists(X_file) or not os.path.exists(y_file):
+        print(f"ERROR: Netflow raw files not found at {NETFLOW_PATH}")
+        print("Please run: python scripts/download_netflow.py")
+        return None, None
+
+    print(f"Loading raw NetFlow data from {NETFLOW_PATH}...")
+    X_raw = np.load(X_file, allow_pickle=True)
+    y_raw = np.load(y_file, allow_pickle=True)
+
+    print(f"Loaded {len(X_raw)} samples with {X_raw.shape[1]} raw features")
+
+    # Column names (from download_netflow.py)
+    # Exclude 'ANOMALY' which is the target, so we have 32 features
+    columns = [
+        'FLOW_ID', 'PROTOCOL_MAP', 'L4_SRC_PORT', 'IPV4_SRC_ADDR', 'L4_DST_PORT', 
+        'IPV4_DST_ADDR', 'FIRST_SWITCHED', 'FLOW_DURATION_MILLISECONDS', 'LAST_SWITCHED', 
+        'PROTOCOL', 'TCP_FLAGS', 'TCP_WIN_MAX_IN', 'TCP_WIN_MAX_OUT', 'TCP_WIN_MIN_IN', 
+        'TCP_WIN_MIN_OUT', 'TCP_WIN_MSS_IN', 'TCP_WIN_SCALE_IN', 'TCP_WIN_SCALE_OUT', 
+        'SRC_TOS', 'DST_TOS', 'TOTAL_FLOWS_EXP', 'MIN_IP_PKT_LEN', 'MAX_IP_PKT_LEN', 
+        'TOTAL_PKTS_EXP', 'TOTAL_BYTES_EXP', 'IN_BYTES', 'IN_PKTS', 'OUT_BYTES', 
+        'OUT_PKTS', 'ANALYSIS_TIMESTAMP', 'ALERT', 'ID'
+    ]
+    
+    # Verify column count matches X_raw
+    if X_raw.shape[1] != len(columns):
+        print(f"Warning: Expected {len(columns)} columns but got {X_raw.shape[1]}. Using generic names.")
+        columns = [f"feat_{i}" for i in range(X_raw.shape[1])]
+
+    # Create DataFrame
+    df = pd.DataFrame(X_raw, columns=columns)
+
+    # Identifiers and timestamps are usually not useful for classification
+    drop_cols = ['FLOW_ID', 'IPV4_SRC_ADDR', 'IPV4_DST_ADDR', 'FIRST_SWITCHED', 'LAST_SWITCHED', 'ANALYSIS_TIMESTAMP', 'ID', 'PROTOCOL_MAP', 'ALERT']
+    existing_drop_cols = [c for c in drop_cols if c in df.columns]
+    df = df.drop(columns=existing_drop_cols)
+    print(f"Dropped {len(existing_drop_cols)} ID/Timestamp columns.")
+
+    # Categorical columns for NetFlow
+    # PROTOCOL and TCP_FLAGS are the primary categorical features that benefit from one-hot encoding.
+    categorical_cols = ['PROTOCOL', 'TCP_FLAGS']
+    
+    # Ensure they exist
+    categorical_cols = [c for c in categorical_cols if c in df.columns]
+
+    # Convert to string to ensure OHE works
+    for col in categorical_cols:
+        df[col] = df[col].astype(str)
+
+    # One-hot encode
+    df = pd.get_dummies(df, columns=categorical_cols, drop_first=False)
+    print(f"After one-hot encoding: {df.shape[1]} features")
+
+    # Fill NaNs if any
+    df = df.fillna(0)
+
+    # Convert to numpy
+    X = df.values.astype(np.float64)
+
+    # Process Labels (y_raw)
+    # y_raw might contain NaNs
+    valid_mask = ~pd.isnull(y_raw)
+    if np.sum(~valid_mask) > 0:
+        print(f"Dropping {np.sum(~valid_mask)} samples with missing labels.")
+        X = X[valid_mask]
+        y_raw = y_raw[valid_mask]
+
+    unique_labels = np.unique(y_raw)
+    print(f"Unique labels: {unique_labels}")
+    
+    # Encode labels to integers
+    label_dict = {label: idx for idx, label in enumerate(unique_labels)}
+    y = np.array([label_dict[l] for l in y_raw])
+    
+    return X, y
 
 def _load_cores_iot():
     """
