@@ -42,7 +42,7 @@ results/reports/*.pdf
 results/reports/*.txt
 
 # Data (exclude large datasets)
-data/raw/**/*.csv
+#data/raw/**/*.csv commented as cores-iot is the only csv
 data/raw/**/*.txt
 data/raw/**/*.dat
 data/processed/
