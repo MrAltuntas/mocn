@@ -7,3 +7,4 @@ seaborn~=0.13.2
 qiskit_machine_learning
 imbalanced-learn
 tqdm
+qiskit-aer
