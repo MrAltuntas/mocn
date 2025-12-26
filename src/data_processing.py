@@ -3,6 +3,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.decomposition import PCA
+from imblearn.over_sampling import SMOTE
 from config import *
 import os
 
@@ -58,6 +59,24 @@ def load_data(dataset_name='kdd99'):
         print(f"  New class distribution after filtering: {np.bincount(y)}")
 
     return X, y
+
+def apply_smote(X, y):
+    """
+    Apply SMOTE to balance the dataset
+    """
+    print(f"\nApplying SMOTE...")
+    print(f"  Original class distribution: {dict(zip(*np.unique(y, return_counts=True)))}")
+    
+    # SMOTE requires k_neighbors. Since MIN_SAMPLES_PER_CLASS is 10,
+    # and default k_neighbors is 5, this should be safe.
+    try:
+        smote = SMOTE(random_state=RANDOM_SEED, k_neighbors=5) # Default k_neighbors is 5
+        X_res, y_res = smote.fit_resample(X, y)
+        print(f"  Resampled class distribution: {dict(zip(*np.unique(y_res, return_counts=True)))}")
+        return X_res, y_res
+    except Exception as e:
+        print(f"  SMOTE failed: {e}. Returning original data.")
+        return X, y
 
 def _load_kdd99():
     """
@@ -319,6 +338,10 @@ def preprocess_data(X, y):
     print(f"      Test:  {X_test.shape[0]} samples")
     print(f"      Class distribution (train): {np.bincount(y_train)}")
     print(f"      Class distribution (test):  {np.bincount(y_test)}")
+
+    # 1.5. Apply SMOTE (only on training data)
+    print(f"[1.5/3] Applying SMOTE to training data...")
+    X_train, y_train = apply_smote(X_train, y_train)
 
     # 2. Normalization (fit sadece train üzerinde)
     if NORMALIZE:
