@@ -11,6 +11,7 @@ import pickle
 import os
 import warnings
 from tqdm import tqdm
+from joblib import Parallel, delayed, cpu_count
 
 # Try to import config, but provide defaults if not available
 try:
@@ -20,6 +21,15 @@ except ImportError:
     QSVM_SHOTS = None
     QSVM_FEATURE_MAP_REPS = 2
     warnings.warn("Config not found, using default values")
+    warnings.warn("Config not found, using default values")
+
+
+def _compute_kernel_batch(quantum_kernel, X_batch, Y):
+    """
+    Helper function to compute kernel for a batch of data.
+    Must be defined at module level to be picklable for multiprocessing.
+    """
+    return quantum_kernel.evaluate(x_vec=X_batch, y_vec=Y)
 
 
 class QuantumSVM:
@@ -123,28 +133,36 @@ class QuantumSVM:
         except ImportError:
             batch_size = 100
 
-        kernel_matrix = []
+        # Create batches
+        batches = [X[i:i + batch_size] for i in range(0, n_samples, batch_size)]
         
-        # Display progress bar only if n_samples spans multiple batches
+        # Parallel processing
+        # Use all available cores (n_jobs=-1)
+        # We prefer 'loky' backend for stability with numpy/qiskit
+        n_jobs = cpu_count()
         disable_tqdm = n_samples <= batch_size
         
-        desc = "Computing Quantum Kernel"
-        # If we can infer what step this is (Train vs Predict)
-        if hasattr(self, 'model') and hasattr(self.model, 'support_vectors_'):
-             # If support vectors exist and Y matches them, checking dimensions might help,
-             # but keeping it generic is safer.
-             pass
-
-        # Create iterator
-        iterator = tqdm(range(0, n_samples, batch_size), desc=desc, disable=disable_tqdm)
-        
-        for i in iterator:
-            X_batch = X[i:i + batch_size]
-            # Compute similarity of this batch against ALL Y
-            # FidelityStatevectorKernel.evaluate(x_vec, y_vec) returns matrix of shape (len(x_vec), len(y_vec))
-            batch_kernel = self.quantum_kernel.evaluate(x_vec=X_batch, y_vec=Y)
-            kernel_matrix.append(batch_kernel)
+        if n_jobs > 1:
+            desc = f"Computing Quantum Kernel (Parallel, {n_jobs} cores)"
+            # Use joblib's Parallel
+            # Note: We can't easily use tqdm with Parallel generator without helper libraries
+            # So we'll print a start message and trust joblib's efficiency.
+            # actually we can use tqdm if we don't use a generator but a list, which we have.
             
+            print(f"\n[Parallel] Launching {len(batches)} tasks on {n_jobs} cores...")
+            
+            kernel_matrix = Parallel(n_jobs=-1, backend='loky')(
+                delayed(_compute_kernel_batch)(self.quantum_kernel, batch, Y) 
+                for batch in tqdm(batches, desc=desc, disable=disable_tqdm)
+            )
+        else:
+            # Fallback to sequential if single core (or simple debug)
+            desc = "Computing Quantum Kernel (Sequential)"
+            iterator = tqdm(batches, desc=desc, disable=disable_tqdm)
+            kernel_matrix = []
+            for batch in iterator:
+                kernel_matrix.append(self.quantum_kernel.evaluate(x_vec=batch, y_vec=Y))
+
         # Concatenate all batch results
         return np.vstack(kernel_matrix)
 
