@@ -13,6 +13,17 @@ import warnings
 from tqdm import tqdm
 from joblib import Parallel, delayed, cpu_count
 
+# Optional GPU support imports
+try:
+    from qiskit_aer import AerSimulator
+    from qiskit_algorithms.state_fidelities import ComputeUncompute
+    from qiskit_machine_learning.kernels import FidelityQuantumKernel
+    from qiskit.primitives import Sampler
+    HAS_AER = True
+except ImportError:
+    HAS_AER = False
+
+
 # Try to import config, but provide defaults if not available
 try:
     from config import QSVM_N_QUBITS, QSVM_SHOTS, QSVM_FEATURE_MAP_REPS
@@ -73,7 +84,34 @@ class QuantumSVM:
         self.model = None
         self.is_trained = False
 
+        self.feature_map = None
+        self.quantum_kernel = None
+        self.model = None
+        self.is_trained = False
+        self.use_gpu = False
+
+        self._check_and_configure_gpu()
         self._initialize_quantum_components()
+
+    def _check_and_configure_gpu(self):
+        """Check for GPU availability and configure check flag"""
+        self.use_gpu = False
+        if HAS_AER:
+            try:
+                sim = AerSimulator()
+                # Check if GPU is available in the specific simulator backend
+                # Note: AerSimulator() usually defaults to CPU unless configured, 
+                # but available_devices() tells us what's physically there.
+                if 'GPU' in sim.available_devices():
+                    print("✓ CUDA GPU detected. Enabling Qiskit Aer GPU acceleration.")
+                    self.use_gpu = True
+                else:
+                    print("ℹ No GPU detected (or Aer not configured for it). Using CPU Parallelization.")
+            except Exception as e:
+                print(f"ℹ Error checking GPU, falling back to CPU: {e}")
+        else:
+            print("ℹ qiskit-aer not installed. Using CPU Parallelization.")
+
 
         print(f"Initialized QuantumSVM with {self.n_qubits} qubits and {self.reps} repetitions")
 
@@ -89,12 +127,47 @@ class QuantumSVM:
             insert_barriers=False  # No barriers for cleaner circuit
         )
 
-        # Create statevector-based fidelity kernel
-        # This computes |<φ(x)|φ(y)>|² between quantum states
-        self.quantum_kernel = FidelityStatevectorKernel(
-            feature_map=self.feature_map,
-            enforce_psd=True  # Ensure positive semi-definite kernel matrix
-        )
+        # Create Kernel based on available hardware
+        if self.use_gpu:
+            # GPU Path: Use FidelityQuantumKernel with Aer Backend
+            try:
+                print(f"  ➜ Configuring GPU Kernel (AerSimulator)...")
+                # Configure Aer backend for GPU
+                gpu_backend = AerSimulator(method='statevector', device='GPU')
+                
+                # Create Sampler with GPU backend
+                # Note: For Qiskit < 1.0 primitives style
+                sampler = Sampler(options={"shots": None}) 
+                # Actually, standard Sampler is Reference. We need BackendSampler logic or similar.
+                # simpler: pass the backend to ComputeUncompute if supported, or use Aer's sampler if available.
+                # Let's try the modern pattern:
+                
+                # We need a fidelity instance
+                fidelity = ComputeUncompute(sampler=sampler)
+                
+                # BUT, to force GPU, we usually need the backend context or a specific primitive.
+                # Ideally we use `Sampler` from `qiskit_aer.primitives` if available
+                from qiskit_aer.primitives import Sampler as AerSampler
+                gpu_sampler = AerSampler(backend_options={"method": "statevector", "device": "GPU"})
+                
+                fidelity = ComputeUncompute(sampler=gpu_sampler)
+                
+                self.quantum_kernel = FidelityQuantumKernel(
+                    feature_map=self.feature_map,
+                    fidelity=fidelity
+                )
+            except Exception as e:
+                print(f"⚠ Failed to initialize GPU kernel ({e}). Falling back to CPU.")
+                self.use_gpu = False
+                
+        # CPU Path (Default check again in case GPU init failed)
+        if not self.use_gpu:
+            # Create statevector-based fidelity kernel (Optimized for CPU)
+            # This computes |<φ(x)|φ(y)>|² between quantum states
+            self.quantum_kernel = FidelityStatevectorKernel(
+                feature_map=self.feature_map,
+                enforce_psd=True  # Ensure positive semi-definite kernel matrix
+            )
 
         # Create SVM with quantum kernel
         # We use the _quantum_kernel_function method as the kernel
@@ -139,32 +212,43 @@ class QuantumSVM:
         # Parallel processing
         # Use all available cores (n_jobs=-1)
         # We prefer 'loky' backend for stability with numpy/qiskit
-        n_jobs = cpu_count()
-        disable_tqdm = n_samples <= batch_size
-        
-        if n_jobs > 1:
-            desc = f"Computing Quantum Kernel (Parallel, {n_jobs} cores)"
-            # Use joblib's Parallel
-            # Note: We can't easily use tqdm with Parallel generator without helper libraries
-            # So we'll print a start message and trust joblib's efficiency.
-            # actually we can use tqdm if we don't use a generator but a list, which we have.
+        # EXECUTION STRATEGY
+        if self.use_gpu:
+            # STRATEGY 1: GPU (Single Process, Batching handled by GPU/Aer)
+            # Parallelizing requests to a single GPU often slows it down due to context switching context.
+            # We will use sequential batching and let Aer optimize the circuit execution.
             
-            print(f"\n[Parallel] Launching {len(batches)} tasks on {n_jobs} cores...")
-            
-            kernel_matrix = Parallel(n_jobs=-1, backend='loky')(
-                delayed(_compute_kernel_batch)(self.quantum_kernel, batch, Y) 
-                for batch in tqdm(batches, desc=desc, disable=disable_tqdm)
-            )
-        else:
-            # Fallback to sequential if single core (or simple debug)
-            desc = "Computing Quantum Kernel (Sequential)"
+            desc = "Computing Quantum Kernel (GPU)"
             iterator = tqdm(batches, desc=desc, disable=disable_tqdm)
             kernel_matrix = []
+            
             for batch in iterator:
-                kernel_matrix.append(self.quantum_kernel.evaluate(x_vec=batch, y_vec=Y))
-
-        # Concatenate all batch results
-        return np.vstack(kernel_matrix)
+                # Evaluate batch
+                batch_kernel = self.quantum_kernel.evaluate(x_vec=batch, y_vec=Y)
+                kernel_matrix.append(batch_kernel)
+                
+            return np.vstack(kernel_matrix)
+            
+        else:
+            # STRATEGY 2: CPU PARALLEL (Use all cores)
+            n_jobs = cpu_count()
+            if n_jobs > 1:
+                desc = f"Computing Quantum Kernel (Parallel, {n_jobs} cores)"
+                print(f"\n[Parallel] Launching {len(batches)} tasks on {n_jobs} cores...")
+                
+                kernel_matrix = Parallel(n_jobs=-1, backend='loky')(
+                    delayed(_compute_kernel_batch)(self.quantum_kernel, batch, Y) 
+                    for batch in tqdm(batches, desc=desc, disable=disable_tqdm)
+                )
+                return np.vstack(kernel_matrix)
+            else:
+                # STRATEGY 3: CPU SEQUENTIAL (Default fallback)
+                desc = "Computing Quantum Kernel (Sequential)"
+                iterator = tqdm(batches, desc=desc, disable=disable_tqdm)
+                kernel_matrix = []
+                for batch in iterator:
+                    kernel_matrix.append(self.quantum_kernel.evaluate(x_vec=batch, y_vec=Y))
+                return np.vstack(kernel_matrix)
 
     def train(self, X_train, y_train, verbose=True):
         """
