@@ -195,40 +195,78 @@ def _load_netflow():
     Load NetFlow dataset from raw numpy files
     Performs one-hot encoding for categorical columns (PROTOCOL, TCP_FLAGS)
     """
-    # Load raw numpy files
-    X_file = os.path.join(NETFLOW_PATH, 'X_raw.npy')
-    y_file = os.path.join(NETFLOW_PATH, 'y_raw.npy')
+    import pickle
 
-    if not os.path.exists(X_file) or not os.path.exists(y_file):
-        print(f"ERROR: Netflow raw files not found at {NETFLOW_PATH}")
-        print("Please run: python scripts/download_netflow.py")
-        return None, None
+    # Try loading from pickle (preserves column names)
+    pkl_file = os.path.join(NETFLOW_PATH, 'netflow_raw.pkl')
+    
+    if os.path.exists(pkl_file):
+        print(f"Loading NetFlow data from {pkl_file}...")
+        try:
+            with open(pkl_file, 'rb') as f:
+                df = pickle.load(f)
+            
+            # Identify target column
+            target_col = None
+            possible_labels = ['label', 'class', 'attack', 'attack_type', 'target', 'anomaly', 'alert']
+            for col in df.columns:
+                if col.lower() in possible_labels:
+                    target_col = col
+                    break
+            
+            if target_col:
+                y_raw = df[target_col].values
+                df = df.drop(columns=[target_col])
+                X_raw = df.values # Just for logging count below
+            else:
+                y_raw = np.array([]) # Should handle this better
+                X_raw = df.values
 
-    print(f"Loading raw NetFlow data from {NETFLOW_PATH}...")
-    X_raw = np.load(X_file, allow_pickle=True)
-    y_raw = np.load(y_file, allow_pickle=True)
+        except Exception as e:
+            print(f"Failed to load pickle: {e}. Falling back to npy.")
+            df = None
+    else:
+        df = None
+
+    if df is None:
+        # Load raw numpy files (fallback)
+        X_file = os.path.join(NETFLOW_PATH, 'X_raw.npy')
+        y_file = os.path.join(NETFLOW_PATH, 'y_raw.npy')
+
+        if not os.path.exists(X_file) or not os.path.exists(y_file):
+            print(f"ERROR: Netflow raw files not found at {NETFLOW_PATH}")
+            print("Please run: python scripts/download_netflow.py")
+            return None, None
+
+        print(f"Loading raw NetFlow data from {NETFLOW_PATH}...")
+        X_raw = np.load(X_file, allow_pickle=True)
+        y_raw = np.load(y_file, allow_pickle=True)
+
+
 
     print(f"Loaded {len(X_raw)} samples with {X_raw.shape[1]} raw features")
 
-    # Column names (from download_netflow.py)
-    # Exclude 'ANOMALY' which is the target, so we have 32 features
-    columns = [
-        'FLOW_ID', 'PROTOCOL_MAP', 'L4_SRC_PORT', 'IPV4_SRC_ADDR', 'L4_DST_PORT', 
-        'IPV4_DST_ADDR', 'FIRST_SWITCHED', 'FLOW_DURATION_MILLISECONDS', 'LAST_SWITCHED', 
-        'PROTOCOL', 'TCP_FLAGS', 'TCP_WIN_MAX_IN', 'TCP_WIN_MAX_OUT', 'TCP_WIN_MIN_IN', 
-        'TCP_WIN_MIN_OUT', 'TCP_WIN_MSS_IN', 'TCP_WIN_SCALE_IN', 'TCP_WIN_SCALE_OUT', 
-        'SRC_TOS', 'DST_TOS', 'TOTAL_FLOWS_EXP', 'MIN_IP_PKT_LEN', 'MAX_IP_PKT_LEN', 
-        'TOTAL_PKTS_EXP', 'TOTAL_BYTES_EXP', 'IN_BYTES', 'IN_PKTS', 'OUT_BYTES', 
-        'OUT_PKTS', 'ANALYSIS_TIMESTAMP', 'ALERT', 'ID'
-    ]
-    
-    # Verify column count matches X_raw
-    if X_raw.shape[1] != len(columns):
-        print(f"Warning: Expected {len(columns)} columns but got {X_raw.shape[1]}. Using generic names.")
-        columns = [f"feat_{i}" for i in range(X_raw.shape[1])]
+    # If df was loaded from pickle, we skip column assignment
+    if df is None:
+        # Column names (from download_netflow.py)
+        # Exclude 'ANOMALY' which is the target, so we have 32 features
+        columns = [
+            'FLOW_ID', 'PROTOCOL_MAP', 'L4_SRC_PORT', 'IPV4_SRC_ADDR', 'L4_DST_PORT', 
+            'IPV4_DST_ADDR', 'FIRST_SWITCHED', 'FLOW_DURATION_MILLISECONDS', 'LAST_SWITCHED', 
+            'PROTOCOL', 'TCP_FLAGS', 'TCP_WIN_MAX_IN', 'TCP_WIN_MAX_OUT', 'TCP_WIN_MIN_IN', 
+            'TCP_WIN_MIN_OUT', 'TCP_WIN_MSS_IN', 'TCP_WIN_SCALE_IN', 'TCP_WIN_SCALE_OUT', 
+            'SRC_TOS', 'DST_TOS', 'TOTAL_FLOWS_EXP', 'MIN_IP_PKT_LEN', 'MAX_IP_PKT_LEN', 
+            'TOTAL_PKTS_EXP', 'TOTAL_BYTES_EXP', 'IN_BYTES', 'IN_PKTS', 'OUT_BYTES', 
+            'OUT_PKTS', 'ANALYSIS_TIMESTAMP', 'ALERT', 'ID'
+        ]
+        
+        # Verify column count matches X_raw
+        if X_raw.shape[1] != len(columns):
+            print(f"Warning: Expected {len(columns)} columns but got {X_raw.shape[1]}. Using generic names.")
+            columns = [f"feat_{i}" for i in range(X_raw.shape[1])]
 
-    # Create DataFrame
-    df = pd.DataFrame(X_raw, columns=columns)
+        # Create DataFrame
+        df = pd.DataFrame(X_raw, columns=columns)
 
     # Identifiers and timestamps are usually not useful for classification
     drop_cols = ['FLOW_ID', 'IPV4_SRC_ADDR', 'IPV4_DST_ADDR', 'FIRST_SWITCHED', 'LAST_SWITCHED', 'ANALYSIS_TIMESTAMP', 'ID', 'PROTOCOL_MAP', 'ALERT']
@@ -252,6 +290,17 @@ def _load_netflow():
     print(f"After one-hot encoding: {df.shape[1]} features")
 
     # Fill NaNs if any
+    df = df.fillna(0)
+
+    # Ensure all columns are numeric
+    # This catches any remaining object columns that weren't one-hot encoded (e.g. typos in column names)
+    for col in df.columns:
+        if df[col].dtype == object or str(df[col].dtype) == 'category':
+            print(f"Warning: Column '{col}' is still non-numeric. Forcing conversion.")
+            # Try to convert to numeric, turning errors (strings) into NaN
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # Fill any new NaNs created by coercion with 0
     df = df.fillna(0)
 
     # Convert to numpy
