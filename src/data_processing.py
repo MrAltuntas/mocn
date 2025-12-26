@@ -4,6 +4,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.decomposition import PCA
 from config import *
+import os
 
 
 def load_data(dataset_name='kdd99'):
@@ -67,8 +68,6 @@ def _load_kdd99():
         X (ndarray): Feature matrix (one-hot encoded, ~120 features)
         y (ndarray): Multi-class labels (0-12, representing 13 attack types)
     """
-    import os
-
     # Load raw numpy files
     X_file = os.path.join(KDD99_PATH, 'X_raw.npy')
     y_file = os.path.join(KDD99_PATH, 'y_raw.npy')
@@ -159,8 +158,6 @@ def _load_netflow():
     Load NetFlow dataset from raw numpy files
     Performs one-hot encoding for categorical columns (PROTOCOL, TCP_FLAGS)
     """
-    import os
-
     # Load raw numpy files
     X_file = os.path.join(NETFLOW_PATH, 'X_raw.npy')
     y_file = os.path.join(NETFLOW_PATH, 'y_raw.npy')
@@ -242,11 +239,61 @@ def _load_netflow():
 
 def _load_cores_iot():
     """
-    Load CORES IoT dataset (placeholder)
-    TODO: Implement actual CORES IoT loading logic
+    Load CORES IoT dataset from raw numpy files
+    Assumes features are numerical and last column is label (0: Normal, 1: Attack)
     """
-    print("WARNING: CORES IoT loader not implemented. Using synthetic data.")
-    return
+    # Load raw numpy files
+    X_file = os.path.join(CORES_IOT_PATH, 'X_raw.npy')
+    y_file = os.path.join(CORES_IOT_PATH, 'y_raw.npy')
+
+    if not os.path.exists(X_file) or not os.path.exists(y_file):
+        print(f"ERROR: CoReS IoT raw files not found at {CORES_IOT_PATH}")
+        print("Please run: python scripts/load_cores_iot.py")
+        return None, None
+
+    print(f"Loading raw CoReS IoT data from {CORES_IOT_PATH}...")
+    X_raw = np.load(X_file, allow_pickle=True)
+    y_raw = np.load(y_file, allow_pickle=True)
+
+    print(f"Loaded {len(X_raw)} samples with {X_raw.shape[1]} raw features")
+
+    # Create DataFrame for consistency and easy processing
+    # We don't have specific column names, so we'll generate generic ones
+    columns = [f"feat_{i}" for i in range(X_raw.shape[1])]
+    df = pd.DataFrame(X_raw, columns=columns)
+
+    # CoReS IoT data is expected to be numerical.
+    # Convert all columns to numeric, coercing errors to NaN
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Fill NaNs with 0
+    if df.isnull().values.any():
+        print(f"Filled {df.isnull().sum().sum()} missing values with 0")
+        df = df.fillna(0)
+
+    # Convert to numpy array
+    X = df.values.astype(np.float64)
+
+    # Process Labels
+    # Ensure labels are integers (0 or 1)
+    y_series = pd.Series(y_raw)
+    y_numeric = pd.to_numeric(y_series, errors='coerce')
+    
+    # Check for invalid labels
+    if y_numeric.isnull().any():
+        print(f"Warning: Found {y_numeric.isnull().sum()} invalid labels. Dropping those samples.")
+        valid_mask = ~y_numeric.isnull()
+        X = X[valid_mask]
+        y_numeric = y_numeric[valid_mask]
+
+    y = y_numeric.astype(int).values
+    
+    unique_labels = np.unique(y)
+    print(f"Unique labels: {unique_labels}")
+    print(f"Class distribution: {np.bincount(y)}")
+
+    return X, y
 
 def preprocess_data(X, y):
     """
