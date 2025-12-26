@@ -60,6 +60,60 @@ def load_data(dataset_name='kdd99'):
 
     return X, y
 
+def _stratified_subsample(df, y_raw):
+    """
+    Subsample dataset to MAX_SAMPLES using stratified sampling.
+    Handles rare classes and NaNs to prevent errors.
+    """
+    if MAX_SAMPLES is None or MAX_SAMPLES >= len(df):
+        return df, y_raw
+
+    print(f"\nOptimization: Subsampling raw data to {MAX_SAMPLES} samples before processing...")
+    
+    # Ensure y_raw matches df length
+    if len(y_raw) != len(df):
+        print(f"  Warning: label length ({len(y_raw)}) != dataframe length ({len(df)}). Skipping subsampling.")
+        return df, y_raw
+
+    # Pre-filter NaNs in y_raw
+    valid_mask = ~pd.isnull(y_raw)
+    if np.sum(~valid_mask) < len(y_raw):
+        print(f"  Pre-filtering {np.sum(~valid_mask)} samples with NaN labels to enable stratification...")
+        df = df[valid_mask]
+        y_raw = y_raw[valid_mask]
+
+    # Pre-filter rare classes based on configuration (must be at least 2 for stratification)
+    # This unifies the "Crash Prevention" (<2) and "Experiment Logic" (<MIN_SAMPLES)
+    filter_threshold = max(2, MIN_SAMPLES_PER_CLASS)
+    unique_vals, counts = np.unique(y_raw, return_counts=True)
+    rare_classes = unique_vals[counts < filter_threshold]
+    
+    if len(rare_classes) > 0:
+        print(f"  Pre-filtering {len(rare_classes)} rare classes (<{filter_threshold} samples) to enable stratification...")
+        mask = ~np.isin(y_raw, rare_classes)
+        df = df[mask]
+        y_raw = y_raw[mask]
+
+    # Use train_test_split for stratified sampling
+    try:
+        df, _, y_raw, _ = train_test_split(
+        df, y_raw,
+        train_size=MAX_SAMPLES,
+        random_state=RANDOM_SEED,
+        stratify=y_raw
+        )
+        print(f"  Subsampled shape: {df.shape}")
+    except ValueError as e:
+        # Fallback if stratification fails (should be rare with above filtering)
+        print(f"  Stratified sampling failed ({e}). Falling back to random sampling.")
+        df, _, y_raw, _ = train_test_split(
+        df, y_raw,
+        train_size=MAX_SAMPLES,
+        random_state=RANDOM_SEED
+        )
+    
+    return df, y_raw
+
 def apply_smote(X, y):
     """
     Apply SMOTE to balance the dataset
@@ -138,6 +192,10 @@ def _load_kdd99():
     # Create DataFrame for easier processing
     df = pd.DataFrame(X_raw, columns=columns)
 
+    # --- OPTIMIZATION: Subsample BEFORE preprocessing ---
+    df, y_raw = _stratified_subsample(df, y_raw)
+    # ----------------------------------------------------
+
     # Handle categorical features (one-hot encoding)
     # Note: protocol_type, service, flag are stored as bytes
     categorical_cols = ['protocol_type', 'service', 'flag']
@@ -195,84 +253,51 @@ def _load_netflow():
     Load NetFlow dataset from raw numpy files
     Performs one-hot encoding for categorical columns (PROTOCOL, TCP_FLAGS)
     """
-    import pickle
+    # Load raw numpy files
+    X_file = os.path.join(NETFLOW_PATH, 'X_raw.npy')
+    y_file = os.path.join(NETFLOW_PATH, 'y_raw.npy')
 
-    # Try loading from pickle (preserves column names)
-    pkl_file = os.path.join(NETFLOW_PATH, 'netflow_raw.pkl')
-    
-    if os.path.exists(pkl_file):
-        print(f"Loading NetFlow data from {pkl_file}...")
-        try:
-            with open(pkl_file, 'rb') as f:
-                df = pickle.load(f)
-            
-            # Identify target column
-            target_col = None
-            possible_labels = ['label', 'class', 'attack', 'attack_type', 'target', 'anomaly', 'alert']
-            for col in df.columns:
-                if col.lower() in possible_labels:
-                    target_col = col
-                    break
-            
-            if target_col:
-                y_raw = df[target_col].values
-                df = df.drop(columns=[target_col])
-                X_raw = df.values # Just for logging count below
-            else:
-                y_raw = np.array([]) # Should handle this better
-                X_raw = df.values
+    if not os.path.exists(X_file) or not os.path.exists(y_file):
+        print(f"ERROR: Netflow raw files not found at {NETFLOW_PATH}")
+        print("Please run: python scripts/download_netflow.py")
+        return None, None
 
-        except Exception as e:
-            print(f"Failed to load pickle: {e}. Falling back to npy.")
-            df = None
-    else:
-        df = None
-
-    if df is None:
-        # Load raw numpy files (fallback)
-        X_file = os.path.join(NETFLOW_PATH, 'X_raw.npy')
-        y_file = os.path.join(NETFLOW_PATH, 'y_raw.npy')
-
-        if not os.path.exists(X_file) or not os.path.exists(y_file):
-            print(f"ERROR: Netflow raw files not found at {NETFLOW_PATH}")
-            print("Please run: python scripts/download_netflow.py")
-            return None, None
-
-        print(f"Loading raw NetFlow data from {NETFLOW_PATH}...")
-        X_raw = np.load(X_file, allow_pickle=True)
-        y_raw = np.load(y_file, allow_pickle=True)
-
-
+    print(f"Loading raw NetFlow data from {NETFLOW_PATH}...")
+    X_raw = np.load(X_file, allow_pickle=True)
+    y_raw = np.load(y_file, allow_pickle=True)
 
     print(f"Loaded {len(X_raw)} samples with {X_raw.shape[1]} raw features")
 
-    # If df was loaded from pickle, we skip column assignment
-    if df is None:
-        # Column names (from download_netflow.py)
-        # Exclude 'ANOMALY' which is the target, so we have 32 features
-        columns = [
-            'FLOW_ID', 'PROTOCOL_MAP', 'L4_SRC_PORT', 'IPV4_SRC_ADDR', 'L4_DST_PORT', 
-            'IPV4_DST_ADDR', 'FIRST_SWITCHED', 'FLOW_DURATION_MILLISECONDS', 'LAST_SWITCHED', 
-            'PROTOCOL', 'TCP_FLAGS', 'TCP_WIN_MAX_IN', 'TCP_WIN_MAX_OUT', 'TCP_WIN_MIN_IN', 
-            'TCP_WIN_MIN_OUT', 'TCP_WIN_MSS_IN', 'TCP_WIN_SCALE_IN', 'TCP_WIN_SCALE_OUT', 
-            'SRC_TOS', 'DST_TOS', 'TOTAL_FLOWS_EXP', 'MIN_IP_PKT_LEN', 'MAX_IP_PKT_LEN', 
-            'TOTAL_PKTS_EXP', 'TOTAL_BYTES_EXP', 'IN_BYTES', 'IN_PKTS', 'OUT_BYTES', 
-            'OUT_PKTS', 'ANALYSIS_TIMESTAMP', 'ALERT', 'ID'
-        ]
-        
-        # Verify column count matches X_raw
-        if X_raw.shape[1] != len(columns):
-            print(f"Warning: Expected {len(columns)} columns but got {X_raw.shape[1]}. Using generic names.")
-            columns = [f"feat_{i}" for i in range(X_raw.shape[1])]
+    # Column names (from download_netflow.py)
+    # Exclude 'ANOMALY' which is the target, so we have 32 features
+    columns = [
+        'FLOW_ID', 'PROTOCOL_MAP', 'L4_SRC_PORT', 'IPV4_SRC_ADDR', 'L4_DST_PORT', 
+        'IPV4_DST_ADDR', 'FIRST_SWITCHED', 'FLOW_DURATION_MILLISECONDS', 'LAST_SWITCHED', 
+        'PROTOCOL', 'TCP_FLAGS', 'TCP_WIN_MAX_IN', 'TCP_WIN_MAX_OUT', 'TCP_WIN_MIN_IN', 
+        'TCP_WIN_MIN_OUT', 'TCP_WIN_MSS_IN', 'TCP_WIN_SCALE_IN', 'TCP_WIN_SCALE_OUT', 
+        'SRC_TOS', 'DST_TOS', 'TOTAL_FLOWS_EXP', 'MIN_IP_PKT_LEN', 'MAX_IP_PKT_LEN', 
+        'TOTAL_PKTS_EXP', 'TOTAL_BYTES_EXP', 'IN_BYTES', 'IN_PKTS', 'OUT_BYTES', 
+        'OUT_PKTS', 'ANALYSIS_TIMESTAMP', 'ALERT', 'ID'
+    ]
+    
+    # Verify column count matches X_raw
+    if X_raw.shape[1] != len(columns):
+        print(f"Warning: Expected {len(columns)} columns but got {X_raw.shape[1]}. Using generic names.")
+        columns = [f"feat_{i}" for i in range(X_raw.shape[1])]
 
-        # Create DataFrame
-        df = pd.DataFrame(X_raw, columns=columns)
+    # Create DataFrame
+    df = pd.DataFrame(X_raw, columns=columns)
 
     # Identifiers and timestamps are usually not useful for classification
     drop_cols = ['FLOW_ID', 'IPV4_SRC_ADDR', 'IPV4_DST_ADDR', 'FIRST_SWITCHED', 'LAST_SWITCHED', 'ANALYSIS_TIMESTAMP', 'ID', 'PROTOCOL_MAP', 'ALERT']
     existing_drop_cols = [c for c in drop_cols if c in df.columns]
     df = df.drop(columns=existing_drop_cols)
     print(f"Dropped {len(existing_drop_cols)} ID/Timestamp columns.")
+
+    # --- OPTIMIZATION: Subsample BEFORE preprocessing ---
+    # This massively speeds up OHE and subsequent steps
+    df, y_raw = _stratified_subsample(df, y_raw)
+    # ----------------------------------------------------
 
     # Categorical columns for NetFlow
     # PROTOCOL and TCP_FLAGS are the primary categorical features that benefit from one-hot encoding.
@@ -292,17 +317,6 @@ def _load_netflow():
     # Fill NaNs if any
     df = df.fillna(0)
 
-    # Ensure all columns are numeric
-    # This catches any remaining object columns that weren't one-hot encoded (e.g. typos in column names)
-    for col in df.columns:
-        if df[col].dtype == object or str(df[col].dtype) == 'category':
-            print(f"Warning: Column '{col}' is still non-numeric. Forcing conversion.")
-            # Try to convert to numeric, turning errors (strings) into NaN
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-    
-    # Fill any new NaNs created by coercion with 0
-    df = df.fillna(0)
-
     # Convert to numpy
     X = df.values.astype(np.float64)
 
@@ -315,7 +329,21 @@ def _load_netflow():
         y_raw = y_raw[valid_mask]
 
     unique_labels = np.unique(y_raw)
-    print(f"Unique labels: {unique_labels}")
+    
+    # Filter out rare classes (less than MIN_SAMPLES_PER_CLASS)
+    label_counts = {label: np.sum(y_raw == label) for label in unique_labels}
+    valid_labels = sorted([label for label, count in label_counts.items() if count >= MIN_SAMPLES_PER_CLASS])
+    removed_labels = sorted([label for label, count in label_counts.items() if count < MIN_SAMPLES_PER_CLASS])
+    
+    # Filter dataset to keep only valid classes
+    if len(removed_labels) > 0:
+        print(f"Filtering rare classes (MIN_SAMPLES_PER_CLASS={MIN_SAMPLES_PER_CLASS})...")
+        valid_mask = np.isin(y_raw, valid_labels)
+        X = X[valid_mask]
+        y_raw = y_raw[valid_mask]
+        print(f"  Removed {len(removed_labels)} classes with {np.sum(~valid_mask)} samples")
+
+    print(f"Unique labels: {np.unique(y_raw)}")
     
     # Encode labels to integers
     label_dict = {label: idx for idx, label in enumerate(unique_labels)}
@@ -348,6 +376,10 @@ def _load_cores_iot():
     columns = [f"feat_{i}" for i in range(X_raw.shape[1])]
     df = pd.DataFrame(X_raw, columns=columns)
 
+    # --- OPTIMIZATION: Subsample BEFORE preprocessing ---
+    df, y_raw = _stratified_subsample(df, y_raw)
+    # ----------------------------------------------------
+
     # CoReS IoT data is expected to be numerical.
     # Convert all columns to numeric, coercing errors to NaN
     for col in df.columns:
@@ -376,7 +408,21 @@ def _load_cores_iot():
     y = y_numeric.astype(int).values
     
     unique_labels = np.unique(y)
-    print(f"Unique labels: {unique_labels}")
+
+    # Filter out rare classes (less than MIN_SAMPLES_PER_CLASS)
+    label_counts = {label: np.sum(y == label) for label in unique_labels}
+    valid_labels = sorted([label for label, count in label_counts.items() if count >= MIN_SAMPLES_PER_CLASS])
+    removed_labels = sorted([label for label, count in label_counts.items() if count < MIN_SAMPLES_PER_CLASS])
+    
+    # Filter dataset to keep only valid classes
+    if len(removed_labels) > 0:
+        print(f"Filtering rare classes (MIN_SAMPLES_PER_CLASS={MIN_SAMPLES_PER_CLASS})...")
+        valid_mask = np.isin(y, valid_labels)
+        X = X[valid_mask]
+        y = y[valid_mask]
+        print(f"  Removed {len(removed_labels)} classes with {np.sum(~valid_mask)} samples")
+        
+    print(f"Unique labels: {np.unique(y)}")
     print(f"Class distribution: {np.bincount(y)}")
 
     return X, y
