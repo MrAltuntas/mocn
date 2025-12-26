@@ -130,9 +130,26 @@ class QuantumSVM:
             try:
                 print(f"  ➜ Configuring GPU Kernel (AerSimulator)...")
                 
-                # Ideally we use `Sampler` from `qiskit_aer.primitives` if available to ensure GPU usage
-                from qiskit_aer.primitives import Sampler as AerSampler
-                gpu_sampler = AerSampler(backend_options={"method": "statevector", "device": "GPU"})
+                # Attempt to use SamplerV2 (Modern Qiskit pattern)
+                # ComputeUncompute requires a V2 sampler
+                try:
+                    from qiskit_aer.primitives import SamplerV2
+                    
+                    # Initialize SamplerV2 (it doesn't take backend in init usually)
+                    gpu_sampler = SamplerV2()
+                    
+                    # Configure options for GPU
+                    # Note: Structure depends on exact version, but this is the standard V2 pattern
+                    gpu_sampler.options.backend_options = {
+                        "method": "statevector",
+                        "device": "GPU",
+                        "shots": None # Infinite precision (like statevector)
+                    }
+                except ImportError:
+                    # Fallback for slightly older versions or if V2 not found
+                    print("  ⚠ SamplerV2 not found in qiskit_aer, trying legacy pattern...")
+                    from qiskit_aer.primitives import Sampler
+                    gpu_sampler = Sampler(backend_options={"method": "statevector", "device": "GPU"})
                 
                 fidelity = ComputeUncompute(sampler=gpu_sampler)
                 

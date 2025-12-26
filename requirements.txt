@@ -8,3 +8,5 @@ qiskit_machine_learning
 imbalanced-learn
 tqdm
 qiskit-aer
+qiskit-aer-gpu
+qiskit-algorithms
