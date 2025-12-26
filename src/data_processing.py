@@ -3,7 +3,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.decomposition import PCA
-from imblearn.over_sampling import SMOTE
+from imblearn.over_sampling import SMOTE, RandomOverSampler
 from config import *
 import os
 
@@ -67,15 +67,33 @@ def apply_smote(X, y):
     print(f"\nApplying SMOTE...")
     print(f"  Original class distribution: {dict(zip(*np.unique(y, return_counts=True)))}")
     
-    # SMOTE requires k_neighbors. Since MIN_SAMPLES_PER_CLASS is 10,
-    # and default k_neighbors is 5, this should be safe.
+    print(f"  Original class distribution: {dict(zip(*np.unique(y, return_counts=True)))}")
+
+    # Check minimum class size
+    unique, counts = np.unique(y, return_counts=True)
+    min_samples = np.min(counts)
+
     try:
-        smote = SMOTE(random_state=RANDOM_SEED, k_neighbors=5) # Default k_neighbors is 5
-        X_res, y_res = smote.fit_resample(X, y)
+        if min_samples < 2:
+            print(f"  Warning: Found class with only {min_samples} samples. SMOTE requires at least 2.")
+            print("  Switching to RandomOverSampler for this run.")
+            ros = RandomOverSampler(random_state=RANDOM_SEED)
+            X_res, y_res = ros.fit_resample(X, y)
+        else:
+            # Adjust k_neighbors if we have small classes
+            # Default k is 5. We need k < n_samples.
+            k_neighbors = min(5, min_samples - 1)
+            if k_neighbors < 5:
+                print(f"  Adjusting SMOTE k_neighbors to {k_neighbors} due to small class size.")
+            
+            smote = SMOTE(random_state=RANDOM_SEED, k_neighbors=k_neighbors)
+            X_res, y_res = smote.fit_resample(X, y)
+
         print(f"  Resampled class distribution: {dict(zip(*np.unique(y_res, return_counts=True)))}")
         return X_res, y_res
+
     except Exception as e:
-        print(f"  SMOTE failed: {e}. Returning original data.")
+        print(f"  Oversampling failed: {e}. Returning original data.")
         return X, y
 
 def _load_kdd99():
@@ -340,8 +358,11 @@ def preprocess_data(X, y):
     print(f"      Class distribution (test):  {np.bincount(y_test)}")
 
     # 1.5. Apply SMOTE (only on training data)
-    print(f"[1.5/3] Applying SMOTE to training data...")
-    X_train, y_train = apply_smote(X_train, y_train)
+    if USE_SMOTE:
+        print(f"[1.5/3] Applying SMOTE to training data...")
+        X_train, y_train = apply_smote(X_train, y_train)
+    else:
+        print(f"[1.5/3] SMOTE disabled. Skipping balancing.")
 
     # 2. Normalization (fit sadece train üzerinde)
     if NORMALIZE:

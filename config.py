@@ -27,6 +27,9 @@ CORES_IOT_PATH = f'{DATA_RAW_DIR}/cores_iot'
 NORMALIZE = True
 NORMALIZATION_METHOD = 'minmax'  # 'minmax' or 'standard'
 
+# Balancing
+USE_SMOTE = False  # Apply SMOTE to balance training data
+
 # PCA (Dimensionality Reduction)
 USE_PCA = True
 PCA_COMPONENTS = 10
