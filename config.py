@@ -48,6 +48,7 @@ SVM_ITERATION_LOG = False
 QSVM_N_QUBITS = 10  # Number of qubits in quantum circuit
 QSVM_SHOTS = None  # None for exact statevector, or integer for sampling
 QSVM_FEATURE_MAP_REPS = 2  # Number of feature map repetitions
+BATCH_QSVM = 100  # Batch size for quantum kernel evaluation
 
 # Training Configuration
 RANDOM_STATE = 42

@@ -10,6 +10,7 @@ import numpy as np
 import pickle
 import os
 import warnings
+from tqdm import tqdm
 
 # Try to import config, but provide defaults if not available
 try:
@@ -112,7 +113,40 @@ class QuantumSVM:
         Y = np.atleast_2d(Y)
 
         # Compute kernel matrix
-        return self.quantum_kernel.evaluate(x_vec=X, y_vec=Y)
+        # Compute kernel matrix in batches
+        n_samples = X.shape[0]
+        
+        # Use config batch size or default to 100
+        try:
+            from config import BATCH_QSVM
+            batch_size = BATCH_QSVM
+        except ImportError:
+            batch_size = 100
+
+        kernel_matrix = []
+        
+        # Display progress bar only if n_samples spans multiple batches
+        disable_tqdm = n_samples <= batch_size
+        
+        desc = "Computing Quantum Kernel"
+        # If we can infer what step this is (Train vs Predict)
+        if hasattr(self, 'model') and hasattr(self.model, 'support_vectors_'):
+             # If support vectors exist and Y matches them, checking dimensions might help,
+             # but keeping it generic is safer.
+             pass
+
+        # Create iterator
+        iterator = tqdm(range(0, n_samples, batch_size), desc=desc, disable=disable_tqdm)
+        
+        for i in iterator:
+            X_batch = X[i:i + batch_size]
+            # Compute similarity of this batch against ALL Y
+            # FidelityStatevectorKernel.evaluate(x_vec, y_vec) returns matrix of shape (len(x_vec), len(y_vec))
+            batch_kernel = self.quantum_kernel.evaluate(x_vec=X_batch, y_vec=Y)
+            kernel_matrix.append(batch_kernel)
+            
+        # Concatenate all batch results
+        return np.vstack(kernel_matrix)
 
     def train(self, X_train, y_train, verbose=True):
         """
