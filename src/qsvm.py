@@ -26,30 +26,34 @@ except ImportError:
     warnings.warn("Config not found, using default values")
 
 
-def _compute_kernel_batch(quantum_kernel, X_batch, Y):
-    """
-    Helper function to compute kernel for a batch of data.
-    Must be defined at module level to be picklable for multiprocessing.
-    """
-    return quantum_kernel.evaluate(x_vec=X_batch, y_vec=Y)
+from qiskit.quantum_info import Statevector
 
+def _compute_statevectors_batch(feature_map, X_batch):
+    """
+    Helper to compute statevectors for a batch of data.
+    """
+    # Create a batch of circuits by binding parameters
+    # Note: Statevector(bound_circ) is efficient enough for simulation
+    batch_states = []
+    
+    # Pre-bind parameters if possible to speed up
+    # But Qiskit 1.0 logic often suggests assign_parameters
+    for x in X_batch:
+        bound = feature_map.assign_parameters(x)
+        # Get the statevector data (numpy array)
+        state_data = Statevector(bound).data
+        batch_states.append(state_data)
+        
+    return np.array(batch_states)
 
 
 class QuantumSVM:
     """
     Quantum Support Vector Machine using Qiskit
     
-    This implementation uses a quantum kernel based on the ZZFeatureMap
-    for encoding classical data into quantum states, combined with 
-    classical SVM optimization.
-    
-    Attributes:
-        n_qubits (int): Number of qubits in the quantum circuit
-        reps (int): Number of repetitions in the feature map
-        feature_map: Quantum feature map circuit (ZZFeatureMap)
-        quantum_kernel: Quantum kernel for computing similarity
-        model (SVC): Scikit-learn SVM with quantum kernel
-        is_trained (bool): Whether the model has been trained
+    This implementation uses a statevector-based kernel for maximum CPU efficiency.
+    It maps data to quantum states: x -> |phi(x)>
+    Then computes kernel: K(x,y) = |<phi(x)|phi(y)>|^2
     """
 
     def __init__(self, n_qubits=None, reps=None):
@@ -72,12 +76,6 @@ class QuantumSVM:
 
         # Initialize quantum components
         self.feature_map = None
-        self.quantum_kernel = None
-        self.model = None
-        self.is_trained = False
-
-        self.feature_map = None
-        self.quantum_kernel = None
         self.model = None
         self.is_trained = False
         
@@ -85,7 +83,7 @@ class QuantumSVM:
         self._initialize_quantum_components()
 
     def _initialize_quantum_components(self):
-        """Initialize quantum feature map and kernel"""
+        """Initialize quantum feature map"""
 
         # Create ZZ Feature Map
         # This map applies rotation gates and entangling gates
@@ -94,13 +92,6 @@ class QuantumSVM:
             reps=self.reps,
             entanglement='full',  # Full entanglement between qubits
             insert_barriers=False  # No barriers for cleaner circuit
-        )
-
-        # Create Kernel
-        # Create statevector-based fidelity kernel
-        self.quantum_kernel = FidelityStatevectorKernel(
-            feature_map=self.feature_map,
-            enforce_psd=True  # Ensure positive semi-definite kernel matrix
         )
 
         # Create SVM with quantum kernel
@@ -112,61 +103,81 @@ class QuantumSVM:
             cache_size=1000  # Increase cache for faster training
         )
 
-    def _quantum_kernel_function(self, X, Y):
+    def _get_statevectors(self, X):
         """
-        Compute quantum kernel matrix between X and Y
-        
-        This is a separate method (not nested) so it can be pickled.
-        
-        Args:
-            X (ndarray): First set of data points
-            Y (ndarray): Second set of data points
-            
-        Returns:
-            ndarray: Kernel matrix
+        Compute statevectors for input data X using parallel processing.
+        Returns matrix of shape (n_samples, 2^n_qubits)
         """
-        # Ensure inputs are 2D numpy arrays
-        X = np.atleast_2d(X)
-        Y = np.atleast_2d(Y)
-
-        # Compute kernel matrix
-        # Compute kernel matrix in batches
         n_samples = X.shape[0]
         
-        # Use config batch size or default to 100
+        # Use config batch size
         try:
             from config import BATCH_QSVM
             batch_size = BATCH_QSVM
         except ImportError:
-            batch_size = 100
+            batch_size = 1000
 
         # Create batches
         batches = [X[i:i + batch_size] for i in range(0, n_samples, batch_size)]
         
-        # Define disable_tqdm here to avoid NameError (FIX)
         disable_tqdm = n_samples <= batch_size
-        
-        # EXECUTION STRATEGY
-        
-        # STRATEGY: CPU PARALLEL (Use all cores)
         n_jobs = cpu_count()
+        
+        desc = f"Computing Statevectors ({n_jobs} cores)"
+        
         if n_jobs > 1:
-            desc = f"Computing Quantum Kernel (Parallel, {n_jobs} cores)"
-            print(f"\n[Parallel] Launching {len(batches)} tasks on {n_jobs} cores...")
-            
-            kernel_matrix = Parallel(n_jobs=-1, backend='loky')(
-                delayed(_compute_kernel_batch)(self.quantum_kernel, batch, Y) 
-                for batch in tqdm(batches, desc=desc, disable=disable_tqdm)
+            # Parallel Execution
+            results_generator = Parallel(n_jobs=-1, backend='loky', return_as='generator')(
+                delayed(_compute_statevectors_batch)(self.feature_map, batch) 
+                for batch in batches
             )
-            return np.vstack(kernel_matrix)
+            
+            states_list = []
+            for batch_states in tqdm(results_generator, total=len(batches), desc=desc, disable=disable_tqdm):
+                states_list.append(batch_states)
+                
+            return np.vstack(states_list)
         else:
-            # STRATEGY: SEQUENTIAL FALLBACK
-            desc = "Computing Quantum Kernel (Sequential)"
-            iterator = tqdm(batches, desc=desc, disable=disable_tqdm)
-            kernel_matrix = []
-            for batch in iterator:
-                kernel_matrix.append(self.quantum_kernel.evaluate(x_vec=batch, y_vec=Y))
-            return np.vstack(kernel_matrix)
+            # Sequential Execution
+            states_list = []
+            for batch in tqdm(batches, desc=desc, disable=disable_tqdm):
+                states_list.append(_compute_statevectors_batch(self.feature_map, batch))
+            return np.vstack(states_list)
+
+    def _quantum_kernel_function(self, X, Y):
+        """
+        Compute quantum kernel matrix between X and Y
+        K(x,y) = |<phi(x)|phi(y)>|^2
+        """
+        X = np.atleast_2d(X)
+        Y = np.atleast_2d(Y)
+        
+        # Optimization: Check if X and Y are the same object (Training time)
+        are_identical = (X is Y) or (np.array_equal(X, Y))
+        
+        # 1. Compute Statevectors for X
+        # print(f"  Computing statevectors for X ({X.shape[0]} samples)...")
+        V_X = self._get_statevectors(X)
+        
+        if are_identical:
+            V_Y = V_X
+        else:
+            # print(f"  Computing statevectors for Y ({Y.shape[0]} samples)...")
+            V_Y = self._get_statevectors(Y)
+            
+        # 2. Compute Kernel Matrix via Matrix Multiplication
+        # K = | V_X . V_Y^T |^2
+        # Use efficient numpy matrix multiplication
+        # print(f"  Computing dot product matrix {X.shape[0]}x{Y.shape[0]}...")
+        
+        # Helper for large dot product if needed, but for now direct matmul is fine
+        # complex conjugate transpose of V_Y
+        raw_kernel = np.dot(V_X, V_Y.conj().T)
+        
+        # Compute magnitude squared for fidelity
+        kernel_matrix = np.abs(raw_kernel) ** 2
+        
+        return kernel_matrix
 
     def train(self, X_train, y_train, verbose=True):
         """
