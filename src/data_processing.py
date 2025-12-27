@@ -250,80 +250,132 @@ def _load_kdd99():
 
 def _load_netflow():
     """
-    Load NetFlow dataset from raw numpy files
-    Performs one-hot encoding for categorical columns (PROTOCOL, TCP_FLAGS)
+    Load NetFlow dataset with robust handling for missing column names.
+    Prioritizes loading 'netflow_raw.pkl' to preserve metadata.
     """
-    # Load raw numpy files
+    pkl_file = os.path.join(NETFLOW_PATH, 'netflow_raw.pkl')
     X_file = os.path.join(NETFLOW_PATH, 'X_raw.npy')
     y_file = os.path.join(NETFLOW_PATH, 'y_raw.npy')
 
-    if not os.path.exists(X_file) or not os.path.exists(y_file):
-        print(f"ERROR: Netflow raw files not found at {NETFLOW_PATH}")
-        print("Please run: python scripts/download_netflow.py")
-        return None, None
+    df = None
+    y_raw = None
 
-    print(f"Loading raw NetFlow data from {NETFLOW_PATH}...")
-    X_raw = np.load(X_file, allow_pickle=True)
-    y_raw = np.load(y_file, allow_pickle=True)
+    # 1. Try loading from Pickle (Best case: preserves column names and types)
+    if os.path.exists(pkl_file):
+        print(f"Loading NetFlow data from {pkl_file} (preserves metadata)...")
+        try:
+            df = pd.read_pickle(pkl_file)
+            print(f"Loaded DataFrame with shape: {df.shape}")
+            
+            # Identify target column
+            possible_labels = ['label', 'class', 'attack', 'attack_type', 'target', 'anomaly', 'alert']
+            target_col = None
+            for col in df.columns:
+                if str(col).lower() in possible_labels:
+                    target_col = col
+                    break
+            
+            if target_col:
+                print(f"  Found target column: {target_col}")
+                y_raw = df[target_col].values
+                df = df.drop(columns=[target_col])
+            else:
+                print("  Warning: No explicit target column found in DataFrame.")
+                # Try to load y_raw separately if it exists
+                if os.path.exists(y_file):
+                    print(f"  Loading labels from {y_file}")
+                    y_raw = np.load(y_file, allow_pickle=True)
+                else:
+                    print("  ERROR: No labels found. Using empty labels.")
+                    y_raw = np.zeros(len(df))
 
-    print(f"Loaded {len(X_raw)} samples with {X_raw.shape[1]} raw features")
+        except Exception as e:
+            print(f"  Failed to load pickle: {e}. Falling back to raw numpy arrays.")
+            df = None
 
-    # Column names (from download_netflow.py)
-    # Exclude 'ANOMALY' which is the target, so we have 32 features
-    columns = [
-        'FLOW_ID', 'PROTOCOL_MAP', 'L4_SRC_PORT', 'IPV4_SRC_ADDR', 'L4_DST_PORT', 
-        'IPV4_DST_ADDR', 'FIRST_SWITCHED', 'FLOW_DURATION_MILLISECONDS', 'LAST_SWITCHED', 
-        'PROTOCOL', 'TCP_FLAGS', 'TCP_WIN_MAX_IN', 'TCP_WIN_MAX_OUT', 'TCP_WIN_MIN_IN', 
-        'TCP_WIN_MIN_OUT', 'TCP_WIN_MSS_IN', 'TCP_WIN_SCALE_IN', 'TCP_WIN_SCALE_OUT', 
-        'SRC_TOS', 'DST_TOS', 'TOTAL_FLOWS_EXP', 'MIN_IP_PKT_LEN', 'MAX_IP_PKT_LEN', 
-        'TOTAL_PKTS_EXP', 'TOTAL_BYTES_EXP', 'IN_BYTES', 'IN_PKTS', 'OUT_BYTES', 
-        'OUT_PKTS', 'ANALYSIS_TIMESTAMP', 'ALERT', 'ID'
-    ]
-    
-    # Verify column count matches X_raw
-    if X_raw.shape[1] != len(columns):
-        print(f"Warning: Expected {len(columns)} columns but got {X_raw.shape[1]}. Using generic names.")
+    # 2. Fallback to Raw Numpy (If pickle failed or doesn't exist)
+    if df is None:
+        if not os.path.exists(X_file) or not os.path.exists(y_file):
+            print(f"ERROR: Netflow raw files not found at {NETFLOW_PATH}")
+            print("Please run: python scripts/download_netflow.py")
+            return None, None
+
+        print(f"Loading raw NetFlow data from {NETFLOW_PATH} (numpy arrays)...")
+        X_raw = np.load(X_file, allow_pickle=True)
+        y_raw = np.load(y_file, allow_pickle=True)
+        
+        # Create DataFrame with generic names
         columns = [f"feat_{i}" for i in range(X_raw.shape[1])]
-
-    # Create DataFrame
-    df = pd.DataFrame(X_raw, columns=columns)
-
-    # Identifiers and timestamps are usually not useful for classification
-    drop_cols = ['FLOW_ID', 'IPV4_SRC_ADDR', 'IPV4_DST_ADDR', 'FIRST_SWITCHED', 'LAST_SWITCHED', 'ANALYSIS_TIMESTAMP', 'ID', 'PROTOCOL_MAP', 'ALERT']
-    existing_drop_cols = [c for c in drop_cols if c in df.columns]
-    df = df.drop(columns=existing_drop_cols)
-    print(f"Dropped {len(existing_drop_cols)} ID/Timestamp columns.")
+        df = pd.DataFrame(X_raw, columns=columns)
+        print(f"Loaded raw array: {df.shape}")
 
     # --- OPTIMIZATION: Subsample BEFORE preprocessing ---
     # This massively speeds up OHE and subsequent steps
     df, y_raw = _stratified_subsample(df, y_raw)
     # ----------------------------------------------------
 
-    # Categorical columns for NetFlow
-    # PROTOCOL and TCP_FLAGS are the primary categorical features that benefit from one-hot encoding.
-    categorical_cols = ['PROTOCOL', 'TCP_FLAGS']
+    # 3. Robust Preprocessing (Handles both named and generic columns)
+    print("Preprocessing NetFlow features...")
     
-    # Ensure they exist
-    categorical_cols = [c for c in categorical_cols if c in df.columns]
+    # Drop known ID/Timestamp columns if they exist (only for named columns)
+    drop_cols_names = ['FLOW_ID', 'IPV4_SRC_ADDR', 'IPV4_DST_ADDR', 'FIRST_SWITCHED', 
+                       'LAST_SWITCHED', 'ANALYSIS_TIMESTAMP', 'ID', 'PROTOCOL_MAP', 'ALERT']
+    existing_drop_cols = [c for c in df.columns if str(c) in drop_cols_names]
+    
+    if existing_drop_cols:
+        df = df.drop(columns=existing_drop_cols)
+        print(f"  Dropped {len(existing_drop_cols)} known ID/timestamp columns.")
 
-    # Convert to string to ensure OHE works
-    for col in categorical_cols:
-        df[col] = df[col].astype(str)
+    # Auto-detect and handle column types
+    # First, try to convert everything to numeric
+    # Heuristic strategy:
+    # 1. Columns that are fully convertible to numbers -> Convert
+    # 2. Columns that fail conversion -> Treat as Categorical
+    # 3. Categorical with HIGH cardinality (>50) -> Drop (likely IDs/IPs that persisted)
+    # 4. Categorical with LOW cardinality -> One-Hot Encode
 
-    # One-hot encode
-    df = pd.get_dummies(df, columns=categorical_cols, drop_first=False)
-    print(f"After one-hot encoding: {df.shape[1]} features")
+    new_df = pd.DataFrame(index=df.index)
+    categorical_cols = []
 
-    # Fill NaNs if any
-    df = df.fillna(0)
+    for col in df.columns:
+        # Attempt numeric conversion
+        numeric_series = pd.to_numeric(df[col], errors='coerce')
+        
+        # Check if we lost too much data (indicating it was actually a string feature)
+        # If previously it wasn't null, but now it is null, it was non-numeric.
+        is_numeric = True
+        if df[col].dtype == object:
+             # If > 50% became NaN, treat as categorical string
+             if numeric_series.isna().sum() > (0.5 * len(df)):
+                 is_numeric = False
+        
+        if is_numeric:
+            new_df[col] = numeric_series.fillna(0) # Fill NaNs (missing values in numeric cols)
+        else:
+            # It's categorical
+            unique_count = df[col].nunique()
+            if unique_count > 50:
+                print(f"  Dropping high-cardinality categorical column '{col}' ({unique_count} unique values).")
+            else:
+                print(f"  Detected categorical column '{col}' ({unique_count} unique values). Keeping for OHE.")
+                categorical_cols.append(col)
+                new_df[col] = df[col].astype(str)
+
+    df = new_df
+
+    # One-hot encode identified categorical columns
+    if categorical_cols:
+        print(f"  One-hot encoding {len(categorical_cols)} categorical columns...")
+        df = pd.get_dummies(df, columns=categorical_cols, drop_first=False)
+    
+    print(f"After processing: {df.shape[1]} features")
 
     # Convert to numpy
     X = df.values.astype(np.float64)
 
     # Process Labels (y_raw)
-    # y_raw might contain NaNs
     valid_mask = ~pd.isnull(y_raw)
-    if np.sum(~valid_mask) > 0:
+    if np.sum(~valid_mask) < len(y_raw):
         print(f"Dropping {np.sum(~valid_mask)} samples with missing labels.")
         X = X[valid_mask]
         y_raw = y_raw[valid_mask]
@@ -346,7 +398,7 @@ def _load_netflow():
     print(f"Unique labels: {np.unique(y_raw)}")
     
     # Encode labels to integers
-    label_dict = {label: idx for idx, label in enumerate(unique_labels)}
+    label_dict = {label: idx for idx, label in enumerate(valid_labels)}
     y = np.array([label_dict[l] for l in y_raw])
     
     return X, y

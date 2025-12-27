@@ -11,7 +11,7 @@ SAVE_MODELS = True  # Save trained models to disk
 # ============================================
 # DATASET PARAMETERS
 # ============================================
-DATASET_NAME = 'cores_iot'  # 'netflow', 'kdd99', 'cores_iot'
+DATASET_NAME = 'netflow'  # 'netflow', 'kdd99', 'cores_iot'
 MAX_SAMPLES = 30000
 MIN_SAMPLES_PER_CLASS = 10  # Minimum samples required per class (rare classes will be filtered out)
 
