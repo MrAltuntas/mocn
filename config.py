@@ -11,8 +11,8 @@ SAVE_MODELS = True  # Save trained models to disk
 # ============================================
 # DATASET PARAMETERS
 # ============================================
-DATASET_NAME = 'netflow'  # 'netflow', 'kdd99', 'cores_iot'
-MAX_SAMPLES = 30000
+DATASET_NAME = 'kdd99'  # 'netflow', 'kdd99', 'cores_iot'
+MAX_SAMPLES = 3000
 MIN_SAMPLES_PER_CLASS = 10  # Minimum samples required per class (rare classes will be filtered out)
 
 DATA_RAW_DIR = 'data/raw'
@@ -34,6 +34,9 @@ USE_SMOTE = True  # Apply SMOTE to balance training data
 USE_PCA = True
 PCA_COMPONENTS = 10
 
+# Cross Validation
+CV_FOLDS = 10
+
 # ============================================
 # CLASSICAL SVM PARAMETERS
 # ============================================
@@ -52,6 +55,7 @@ QSVM_N_QUBITS = 10  # Number of qubits in quantum circuit
 QSVM_SHOTS = None  # None for exact statevector, or integer for sampling
 QSVM_FEATURE_MAP_REPS = 2  # Number of feature map repetitions
 BATCH_QSVM = 1000  # Batch size for quantum kernel evaluation
+# QSVM_MAX_SAMPLES removed as we use global MAX_SAMPLES
 
 # Training Configuration
 RANDOM_STATE = 42

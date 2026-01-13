@@ -479,42 +479,23 @@ def _load_cores_iot():
 
     return X, y
 
-def preprocess_data(X, y):
+def prepare_fold_data(X_train, y_train, X_val, y_val):
     """
-    Preprocessing pipeline:
-    1. Train/test split
-    2. Normalize features (fit only on train)
-    3. Apply PCA (fit only on train)
+    Process data for a specific Cross-Validation fold.
+    Ensures ZERO DATA LEAKAGE by fitting transformations ONLY on X_train.
+    
+    Pipeline:
+    1. SMOTE (Train only)
+    2. Normalize (Fit Train, Transform Val)
+    3. PCA (Fit Train, Transform Val)
     """
-    print("\n" + "="*50)
-    print("PREPROCESSING PIPELINE")
-    print("="*50)
-
-    # 1. Train/Test Split (önce)
-    print(f"[1/3] Splitting data (train={TRAIN_TEST_SPLIT:.0%}, test={1-TRAIN_TEST_SPLIT:.0%})...")
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y,
-        test_size=1-TRAIN_TEST_SPLIT,
-        random_state=RANDOM_SEED,
-        stratify=y
-    )
-
-    print(f"      Train: {X_train.shape[0]} samples")
-    print(f"      Test:  {X_test.shape[0]} samples")
-    print(f"      Class distribution (train): {np.bincount(y_train)}")
-    print(f"      Class distribution (test):  {np.bincount(y_test)}")
-
-    # 1.5. Apply SMOTE (only on training data)
+    
+    # 1. SMOTE (Balancing) - Only on Training Data
     if USE_SMOTE:
-        print(f"[1.5/3] Applying SMOTE to training data...")
         X_train, y_train = apply_smote(X_train, y_train)
-    else:
-        print(f"[1.5/3] SMOTE disabled. Skipping balancing.")
 
-    # 2. Normalization (fit sadece train üzerinde)
+    # 2. Normalization
     if NORMALIZE:
-        print(f"[2/3] Normalizing features using {NORMALIZATION_METHOD}...")
-
         if NORMALIZATION_METHOD == 'minmax':
             scaler = MinMaxScaler()
         elif NORMALIZATION_METHOD == 'standard':
@@ -522,33 +503,25 @@ def preprocess_data(X, y):
         else:
             raise ValueError(f"Unknown normalization method: {NORMALIZATION_METHOD}")
 
+        # FIT only on training data
         scaler.fit(X_train)
+        
+        # Transform both
         X_train = scaler.transform(X_train)
-        X_test = scaler.transform(X_test)
-
-        print(f"      Train range: {X_train.min():.2f} - {X_train.max():.2f}")
-        print(f"      Test  range: {X_test.min():.2f} - {X_test.max():.2f}")
-    else:
-        print("[2/3] Normalization disabled.")
-
-    # 3. PCA (fit yine sadece train üzerinde)
+        X_val = scaler.transform(X_val)
+    
+    # 3. PCA
     if USE_PCA:
-        print(f"[3/3] Applying PCA with {PCA_COMPONENTS} components...")
-        original_features = X_train.shape[1]
-
         pca = PCA(n_components=PCA_COMPONENTS, random_state=RANDOM_SEED)
+        
+        # FIT only on training data
         pca.fit(X_train)
-
+        
+        # Transform both
         X_train = pca.transform(X_train)
-        X_test = pca.transform(X_test)
+        X_val = pca.transform(X_val)
 
-        variance_explained = pca.explained_variance_ratio_.sum()
-        print(f"      Reduced from {original_features} to {PCA_COMPONENTS} features")
-        print(f"      Explained variance (train): {variance_explained:.2%}")
-    else:
-        print("[3/3] PCA disabled.")
-
-    return X_train, X_test, y_train, y_test
+    return X_train, y_train, X_val, y_val
 
 def get_dataset_info(X, y):
     """

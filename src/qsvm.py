@@ -78,6 +78,7 @@ class QuantumSVM:
         self.feature_map = None
         self.model = None
         self.is_trained = False
+        self.X_train = None  # Store training data for kernel computation
         
         # Initialize quantum components
         self._initialize_quantum_components()
@@ -94,10 +95,10 @@ class QuantumSVM:
             insert_barriers=False  # No barriers for cleaner circuit
         )
 
-        # Create SVM with quantum kernel
-        # We use the _quantum_kernel_function method as the kernel
+        # Create SVM with precomputed kernel
+        # We compute the kernel matrix manually to avoid redundant simulations in multi-class problems
         self.model = SVC(
-            kernel=self._quantum_kernel_function,
+            kernel='precomputed',
             probability=True,  # Enable probability predictions
             class_weight='balanced',  # Handle imbalanced classes
             cache_size=1000  # Increase cache for faster training
@@ -123,11 +124,12 @@ class QuantumSVM:
         disable_tqdm = n_samples <= batch_size
         n_jobs = cpu_count()
         
-        desc = f"Computing Statevectors ({n_jobs} cores)"
+        desc = f"Computing Statevectors ({n_jobs} cores) [{n_samples} samples]"
         
         if n_jobs > 1:
-            # Parallel Execution
-            results_generator = Parallel(n_jobs=-1, backend='loky', return_as='generator')(
+            # Parallel Execution - Disabled for stability (Qiskit threading issues)
+            # Was causing 'Mismatching number of values and parameters'
+            results_generator = Parallel(n_jobs=1, backend='threading', return_as='generator')(
                 delayed(_compute_statevectors_batch)(self.feature_map, batch) 
                 for batch in batches
             )
@@ -149,6 +151,7 @@ class QuantumSVM:
         Compute quantum kernel matrix between X and Y
         K(x,y) = |<phi(x)|phi(y)>|^2
         """
+        # Ensure inputs are 2D
         X = np.atleast_2d(X)
         Y = np.atleast_2d(Y)
         
@@ -156,21 +159,18 @@ class QuantumSVM:
         are_identical = (X is Y) or (np.array_equal(X, Y))
         
         # 1. Compute Statevectors for X
-        # print(f"  Computing statevectors for X ({X.shape[0]} samples)...")
         V_X = self._get_statevectors(X)
         
         if are_identical:
             V_Y = V_X
         else:
-            # print(f"  Computing statevectors for Y ({Y.shape[0]} samples)...")
             V_Y = self._get_statevectors(Y)
             
         # 2. Compute Kernel Matrix via Matrix Multiplication
         # K = | V_X . V_Y^T |^2
-        # Use efficient numpy matrix multiplication
-        # print(f"  Computing dot product matrix {X.shape[0]}x{Y.shape[0]}...")
+        if are_identical:
+            print(f"  Computing Kernel Matrix ({X.shape[0]}x{Y.shape[0]})...")
         
-        # Helper for large dot product if needed, but for now direct matmul is fine
         # complex conjugate transpose of V_Y
         raw_kernel = np.dot(V_X, V_Y.conj().T)
         
@@ -182,14 +182,6 @@ class QuantumSVM:
     def train(self, X_train, y_train, verbose=True):
         """
         Train the Quantum SVM
-        
-        Args:
-            X_train (ndarray): Training features [n_samples, n_features]
-            y_train (ndarray): Training labels [n_samples]
-            verbose (bool): Print training information
-            
-        Raises:
-            ValueError: If feature dimension doesn't match n_qubits
         """
         # Validate input
         X_train = np.asarray(X_train)
@@ -213,18 +205,26 @@ class QuantumSVM:
 
         if verbose:
             print(f"\n{'='*60}")
-            print(f"Training Quantum SVM")
+            print(f"Training Quantum SVM (Precomputed Kernel)")
             print(f"{'='*60}")
             print(f"Training samples: {X_train.shape[0]}")
             print(f"Features (qubits): {X_train.shape[1]}")
             print(f"Classes: {len(np.unique(y_train))}")
             print(f"Feature map: ZZFeatureMap with {self.reps} reps")
             print(f"Entanglement: full")
-            print(f"Kernel: Statevector Fidelity")
+            print(f"Kernel: Precomputed Statevector Fidelity")
             print(f"{'='*60}\n")
 
-        # Train the model
-        self.model.fit(X_train, y_train)
+        # Store training data for prediction kernel computation
+        self.X_train = X_train
+
+        # Compute the full kernel matrix once
+        print("Precomputing Training Kernel Matrix...")
+        kernel_matrix = self._quantum_kernel_function(X_train, X_train)
+
+        # Train the model using the precomputed matrix
+        # Note: SVC(kernel='precomputed') expects a square matrix (n_samples, n_samples)
+        self.model.fit(kernel_matrix, y_train)
         self.is_trained = True
 
         if verbose:
@@ -233,76 +233,51 @@ class QuantumSVM:
     def predict(self, X_test):
         """
         Predict labels for test data
-        
-        Args:
-            X_test (ndarray): Test features [n_samples, n_features]
-            
-        Returns:
-            ndarray: Predicted labels [n_samples]
-            
-        Raises:
-            RuntimeError: If model not trained
-            ValueError: If feature dimension doesn't match
         """
         if not self.is_trained:
             raise RuntimeError("Model must be trained before making predictions")
 
-        # Validate input
         X_test = np.asarray(X_test)
-
-        if X_test.ndim != 2:
-            raise ValueError(f"X_test must be 2D, got shape {X_test.shape}")
-
+        
         if X_test.shape[1] != self.n_qubits:
-            raise ValueError(
-                f"Feature dimension ({X_test.shape[1]}) must match "
-                f"n_qubits ({self.n_qubits})"
-            )
+            raise ValueError(f"Feature dimension mismatch: {X_test.shape[1]} vs {self.n_qubits}")
 
-        return self.model.predict(X_test)
+        # Compute kernel between test vs train
+        # Note: SVC(kernel='precomputed').predict expects matrix of shape (n_test_samples, n_train_samples)
+        kernel_matrix = self._quantum_kernel_function(X_test, self.X_train)
+        
+        return self.model.predict(kernel_matrix)
 
     def predict_proba(self, X_test):
         """
         Predict class probabilities
-        
-        Args:
-            X_test (ndarray): Test features [n_samples, n_features]
-            
-        Returns:
-            ndarray: Class probabilities [n_samples, n_classes]
-            
-        Raises:
-            RuntimeError: If model not trained
         """
         if not self.is_trained:
             raise RuntimeError("Model must be trained before making predictions")
 
-        # Validate input
         X_test = np.asarray(X_test)
 
         if X_test.shape[1] != self.n_qubits:
-            raise ValueError(
-                f"Feature dimension ({X_test.shape[1]}) must match "
-                f"n_qubits ({self.n_qubits})"
-            )
+            raise ValueError(f"Feature dimension mismatch: {X_test.shape[1]} vs {self.n_qubits}")
 
-        return self.model.predict_proba(X_test)
+        # Compute kernel between test vs train
+        kernel_matrix = self._quantum_kernel_function(X_test, self.X_train)
+
+        return self.model.predict_proba(kernel_matrix)
 
     def score(self, X_test, y_test):
         """
         Compute accuracy score
-        
-        Args:
-            X_test (ndarray): Test features
-            y_test (ndarray): True labels
-            
-        Returns:
-            float: Accuracy score
         """
         if not self.is_trained:
             raise RuntimeError("Model must be trained before scoring")
+            
+        X_test = np.asarray(X_test)
 
-        return self.model.score(X_test, y_test)
+        # Compute kernel between test vs train
+        kernel_matrix = self._quantum_kernel_function(X_test, self.X_train)
+        
+        return self.model.score(kernel_matrix, y_test)
 
     def save(self, path):
         """
@@ -317,7 +292,8 @@ class QuantumSVM:
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
 
-        # Save the entire object (Qiskit objects pickle well in recent versions)
+        # Save the entire object
+        # Note: We are saving the model, which includes self.X_train (needed for prediction)
         with open(path, 'wb') as f:
             pickle.dump(self, f)
 
@@ -358,7 +334,7 @@ class QuantumSVM:
             'reps': self.reps,
             'feature_map': 'ZZFeatureMap',
             'entanglement': 'full',
-            'kernel': 'FidelityStatevectorKernel',
+            'kernel': 'PrecomputedStatevectorFidelity',
             'is_trained': self.is_trained
         }
 
@@ -421,7 +397,7 @@ class QuantumSVM:
             "-" * 40,
             f"Qubits: {self.n_qubits}",
             f"Feature Map: ZZFeatureMap (reps={self.reps})",
-            f"Kernel: Statevector Fidelity",
+            f"Kernel: Precomputed Statevector Fidelity",
             f"Status: {'Trained' if self.is_trained else 'Untrained'}",
             ]
 
@@ -488,8 +464,3 @@ if __name__ == "__main__":
     print("\nCircuit Information:")
     for key, value in qsvm.get_circuit_info().items():
         print(f"  {key}: {value}")
-
-    # Save and load
-    qsvm.save("qsvm_model.pkl")
-    loaded_qsvm = QuantumSVM.load("qsvm_model.pkl")
-    print(f"\nLoaded model: {loaded_qsvm}")
